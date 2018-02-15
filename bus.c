@@ -172,7 +172,6 @@ int bus_post_message(BusConnection *bc, int client_id, void *msg, size_t len)
     len = len <= BUS_MAX_MESSAGE_SIZE ? len : BUS_MAX_MESSAGE_SIZE;
 
     int message_id = 0;
-    bool message_acquired = false;
     for (message_id = 0; message_id < BUS_MAX_MESSAGES; ++message_id) {
         if (bus->message_table[message_id] != BUS_MSG_FREE) {
             continue;
