@@ -7,6 +7,7 @@
 #include <sys/types.h>
 #include <sys/mman.h>
 #include <fcntl.h>
+#include <time.h>
 #include "bus.h"
 
 #define BUS_MAX_CLIENTS 64
@@ -23,14 +24,15 @@ enum message_state {
     BUS_MSG_FREE = 0xFF,
 };
 
-typedef uint64_t message_id_t;
-#define MAX_MESSAGE_ID UINT64_MAX
+typedef struct timespec message_id_t;
+static const message_id_t MAX_MESSAGE_ID = {
+    .tv_sec = (((time_t) 1 << (sizeof(time_t) * 8 - 2)) - 1) * 2 + 1,
+    .tv_nsec = (((long) 1 << (sizeof(long) * 8 - 2)) - 1) * 2 + 1
+};
+
 
 struct bus {
     uint8_t clients_table[BUS_MAX_CLIENTS];
-    /* The sequence counter associated with each bus client (to be sure
-     * that messages are delivered in order). */
-    message_id_t next_message_id_for_client[BUS_MAX_CLIENTS];
     uint8_t message_table[BUS_MAX_MESSAGES];
     message_id_t message_id_table[BUS_MAX_MESSAGES];
     char clients[BUS_MAX_CLIENTS][BUS_MAX_CLIENT_NAME];
@@ -40,8 +42,6 @@ struct bus {
 struct bus_connection {
     const char *client_name;
     int client_id;
-    /* Next message ID for this client to be fetched from bus */
-    message_id_t message_id_to_fetch;
     struct bus *bus;
 };
 
@@ -52,9 +52,18 @@ static inline bool atomic_compare_and_swap(uint8_t *ptr, uint8_t expected,
         __ATOMIC_SEQ_CST, __ATOMIC_RELAXED);
 }
 
-static inline message_id_t atomic_fetch_and_inc(message_id_t *ptr)
+static bool message_id_is_lower(const message_id_t *id1, const message_id_t *id2)
 {
-    return __atomic_fetch_add(ptr, 1, __ATOMIC_SEQ_CST);
+    if (id1->tv_sec == id2->tv_sec) {
+        return id1->tv_nsec < id2->tv_nsec;
+    } else {
+        return id1->tv_sec < id2->tv_sec;
+    }
+}
+
+static void get_message_id(message_id_t *id)
+{
+    clock_gettime(CLOCK_MONOTONIC, (struct timespec *)id);
 }
 
 int bus_create(const char *bus_name)
@@ -79,8 +88,6 @@ int bus_create(const char *bus_name)
     }
 
     memset(bus, -1, sizeof(struct bus));
-    memset(bus->next_message_id_for_client, 0, sizeof(bus->next_message_id_for_client));
-    memset(bus->message_id_table, 0, sizeof(bus->message_id_table));
 
     return 0;
 }
@@ -156,33 +163,6 @@ BusConnection *bus_connect(const char *bus_name, const char *client_name)
         return NULL;
     }
 
-    message_id_t message_id_to_fetch = bus->next_message_id_for_client[client_id];
-
-    /* Assuming that there was some messages delivered while client was offline,
-     * search for smallest message ID for this client ID.
-     *
-     * FIXME: There is an issue that may cause messages order to be broken
-     * on message_id overflow: assume that client is disconnected, and while
-     * being offline, received message with maximum possible ID and then with
-     * minimum possible ID (0). In this case smallest found ID will be zero,
-     * and message with maximum possible ID will be lost (indeed case is a bit
-     * wider, but the main idea is clear). */
-    bool unreceived_messages = false;
-    message_id_t min_message_id = MAX_MESSAGE_ID;
-    for (int msg_index = 0; msg_index < BUS_MAX_MESSAGES; ++msg_index) {
-        if (bus->message_table[msg_index] == client_id) {
-            if (bus->message_id_table[msg_index] < min_message_id) {
-                min_message_id = bus->message_id_table[msg_index];
-            }
-            unreceived_messages = true;
-        }
-    }
-    if (unreceived_messages) {
-        bc->message_id_to_fetch = min_message_id;
-    } else {
-        bc->message_id_to_fetch = message_id_to_fetch;
-    }
-
     bus->clients_table[client_id] = BUS_CLIENT_CONNECTED;
 
     return bc;
@@ -225,9 +205,7 @@ int bus_post_message(BusConnection *bc, int client_id, void *msg, size_t len)
         }
 
         memcpy(bus->messages[msg_index], msg, len);
-        message_id_t message_id = atomic_fetch_and_inc(
-            &bus->next_message_id_for_client[client_id]);
-        bus->message_id_table[msg_index] = message_id;
+        get_message_id(&bus->message_id_table[msg_index]);
         bus->message_table[msg_index] = (uint8_t)client_id;
         return 0;
     }
@@ -235,38 +213,39 @@ int bus_post_message(BusConnection *bc, int client_id, void *msg, size_t len)
     return -1;
 }
 
+static int lowest_message_index_to_fetch(struct bus *bus, int client_id)
+{
+    const message_id_t *lowest_msg_id = &MAX_MESSAGE_ID;
+    int lowest_index = -1;
+
+    for (int msg_index = 0; msg_index < BUS_MAX_MESSAGES; ++msg_index) {
+        if (bus->message_table[msg_index] != client_id) {
+            continue;
+        }
+
+        const message_id_t *current_msg_id = &bus->message_id_table[msg_index];
+
+        if (message_id_is_lower(current_msg_id, lowest_msg_id)) {
+            lowest_msg_id = current_msg_id;
+            lowest_index = msg_index;
+        }
+    }
+
+    return lowest_index;
+}
+
 int bus_fetch_message(BusConnection *bc, void *msg, size_t len)
 {
     struct bus *bus = bc->bus;
 
-    /* There is no messages to fetch if next message id to fetch is the same
-     * as next message id */
-    if (bc->message_id_to_fetch == bus->next_message_id_for_client[bc->client_id]) {
+    int msg_index = lowest_message_index_to_fetch(bus, bc->client_id);
+    if (msg_index == -1) {
         return -1;
     }
 
-    for (int msg_index = 0; msg_index < BUS_MAX_MESSAGES; ++msg_index) {
-        if (bus->message_table[msg_index] != bc->client_id) {
-            continue;
-        }
-
-        if (bus->message_id_table[msg_index] != bc->message_id_to_fetch) {
-            continue;
-        }
-
-        memcpy(msg, bus->messages[msg_index], len);
-        bc->message_id_to_fetch++;
-        bus->message_table[msg_index] = BUS_MSG_FREE;
-        return 0;
-    }
-
-    /* There is may be an issue when message with current ID to fetch not found,
-     * but there are other messages for this client exists. This may happen if
-     * posting of message on some client was interrupted and that client stopped
-     * working just between incrementing message ID and writing client ID
-     * to message_table. */
-
-    return -1;
+    memcpy(msg, bus->messages[msg_index], len);
+    bus->message_table[msg_index] = BUS_MSG_FREE;
+    return 0;
 }
 
 void bus_flush_messages(BusConnection *bc)
