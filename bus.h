@@ -42,4 +42,7 @@ int bus_post_message(BusConnection *bc, int client_id, void *msg, size_t len);
  * -1 if no message fetched. */
 int bus_fetch_message(BusConnection *bc, void *msg, size_t len);
 
+/* Remove all messages sent for current client */
+void bus_flush_messages(BusConnection *bc);
+
 #endif /* SMEMBUS_H */

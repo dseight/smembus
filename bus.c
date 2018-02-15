@@ -210,3 +210,16 @@ int bus_fetch_message(BusConnection *bc, void *msg, size_t len)
 
     return -1;
 }
+
+void bus_flush_messages(BusConnection *bc)
+{
+    struct bus *bus = bc->bus;
+
+    for (int message_id = 0; message_id < BUS_MAX_MESSAGES; ++message_id) {
+        if (bus->message_table[message_id] != bc->client_id) {
+            continue;
+        }
+
+        bus->message_table[message_id] = BUS_MSG_FREE;
+    }
+}
