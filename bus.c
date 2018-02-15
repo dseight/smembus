@@ -169,7 +169,6 @@ int bus_get_client_id(BusConnection *bc, const char *client_name)
 int bus_post_message(BusConnection *bc, int client_id, void *msg, size_t len)
 {
     struct bus *bus = bc->bus;
-    len = len <= BUS_MAX_MESSAGE_SIZE ? len : BUS_MAX_MESSAGE_SIZE;
 
     int message_id = 0;
     for (message_id = 0; message_id < BUS_MAX_MESSAGES; ++message_id) {
@@ -196,7 +195,6 @@ int bus_post_message(BusConnection *bc, int client_id, void *msg, size_t len)
 int bus_fetch_message(BusConnection *bc, void *msg, size_t len)
 {
     struct bus *bus = bc->bus;
-    len = len <= BUS_MAX_MESSAGE_SIZE ? len : BUS_MAX_MESSAGE_SIZE;
 
     for (int message_id = 0; message_id < BUS_MAX_MESSAGES; ++message_id) {
         if (bus->message_table[message_id] != bc->client_id) {
